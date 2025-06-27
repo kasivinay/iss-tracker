@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Real ISS Tracker with satellite.js</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    html, body, #map { height: 100%; margin: 0; }
+    .clock-popup { font-size: 14px; font-weight: bold; }
+  </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<!-- Leaflet JS -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<!-- Satellite.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/satellite.js/4.1.0/satellite.min.js"></script>
+
+<!-- Terminator Layer -->
+<script src="L.Terminator.js"></script>
+
+<script>
+  const map = L.map('map').setView([0, 0], 2);
+
+  // Satellite base map from MapTiler
+  L.tileLayer('https://api.maptiler.com/maps/satellite/{z}/{x}/{y}.jpg?key=SNHQiBkupnznQyxi4Yqf', {
+    tileSize: 512,
+    zoomOffset: -1,
+    attribution: '&copy; <a href="https://www.maptiler.com/">MapTiler</a>'
+  }).addTo(map);
+
+  // ISS Icon and Marker
+  const issIcon = L.icon({
+    iconUrl: 'https://upload.wikimedia.org/wikipedia/commons/d/d0/International_Space_Station.svg',
+    iconSize: [90, 60],
+    iconAnchor: [45, 30]
+  });
+  const issMarker = L.marker([0, 0], { icon: issIcon }).addTo(map);
+  let issPath = [];
+  const trail = L.polyline([], { color: 'red' }).addTo(map);
+  const future = L.polyline([], { color: 'blue', dashArray: '4,6' }).addTo(map);
+
+  let satrec = null;
+
+  // Fetch TLE
+  async function fetchTLE() {
+    const res = await fetch("https://celestrak.org/NORAD/elements/stations.txt");
+    const text = await res.text();
+    const lines = text.split("\n");
+    const idx = lines.findIndex(l => l.startsWith("ISS (ZARYA)"));
+    if (idx !== -1) {
+      const tleLine1 = lines[idx + 1].trim();
+      const tleLine2 = lines[idx + 2].trim();
+      satrec = satellite.twoline2satrec(tleLine1, tleLine2);
+    }
+  }
+
+  // Get live ISS location from API
+  async function updateISS() {
+    if (!satrec) return;
+
+    const res = await fetch('https://api.wheretheiss.at/v1/satellites/25544');
+    const data = await res.json();
+    const lat = data.latitude;
+    const lon = data.longitude;
+    const vel = data.velocity.toFixed(0);     // km/h
+    const alt = data.altitude.toFixed(1);      // km
+
+    const latlng = [lat, lon];
+    issMarker.setLatLng(latlng);
+    issPath.push(latlng);
+    if (issPath.length > 100) issPath.shift();
+    trail.setLatLngs(issPath);
+
+    issMarker.bindPopup(`
+      <b>🛰 ISS Position</b><br>
+      📍 Lat: ${lat.toFixed(2)}, Lon: ${lon.toFixed(2)}<br>
+      📏 Altitude: ${alt} km<br>
+      ⚡ Speed: ${vel} km/h
+    `).openPopup();
+
+    // 🔮 Accurate future path using satellite.js
+    const futurePts = [];
+    const now = new Date();
+    for (let i = 1; i <= 60; i++) {
+      const futureTime = new Date(now.getTime() + i * 10 * 1000); // 10 sec interval
+      const gmst = satellite.gstime(futureTime);
+      const posVel = satellite.propagate(satrec, futureTime);
+      if (!posVel.position) continue;
+
+      const geodetic = satellite.eciToGeodetic(posVel.position, gmst);
+      const futureLat = satellite.degreesLat(geodetic.latitude);
+      const futureLon = satellite.degreesLong(geodetic.longitude);
+      futurePts.push([futureLat, futureLon]);
+    }
+    future.setLatLngs(futurePts);
+  }
+
+  // 🕓 Show local time on map click
+  map.on('click', function (e) {
+    const lat = e.latlng.lat;
+    const lng = e.latlng.lng;
+    const url = `https://api.timezonedb.com/v2.1/get-time-zone?key=CYYZNQ2QWFCF&format=json&by=position&lat=${lat}&lng=${lng}`;
+
+    fetch(url)
+      .then(res => res.json())
+      .then(data => {
+        const localTime = data.formatted;
+        const timeZone = data.zoneName;
+        L.popup()
+          .setLatLng(e.latlng)
+          .setContent(`<div class="clock-popup">🕒 ${localTime}<br>🌐 ${timeZone}</div>`)
+          .openOn(map);
+      })
+      .catch(() => {
+        L.popup()
+          .setLatLng(e.latlng)
+          .setContent("⚠️ Couldn't load time.")
+          .openOn(map);
+      });
+  });
+
+  // ☀️ Day/Night shading
+  let terminatorLayer;
+  function updateTerminator() {
+    if (terminatorLayer) map.removeLayer(terminatorLayer);
+    terminatorLayer = new L.Terminator();
+    terminatorLayer.addTo(map);
+  }
+
+  // Initialize
+  fetchTLE().then(() => {
+    updateISS();
+    setInterval(updateISS, 5000);
+    updateTerminator();
+    setInterval(updateTerminator, 60000);
+  });
+</script>
+
+</body>
+</html>
